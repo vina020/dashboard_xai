@@ -28,6 +28,31 @@ PAKAR = ["Pakar 1 - praktisi industri emas", "Pakar 2 - praktisi perbankan"]
 NILAI_SESUAI = ["Sesuai", "Sebagian sesuai", "Tidak sesuai"]
 ARAH_PAKAR = ["Searah", "Berlawanan", "Tidak menentu", "Tidak ada hubungan"]
 
+KOLOM_SHEET = ["responden", "tanggal", "waktu_simpan", "gold_ditampilkan", "faktor", "peringkat_model", "pengaruh_usd", "porsi_persen",
+               "arah_hasil", "kesesuaian", "arah_pakar", "peringkat_pakar", "catatan"]
+
+
+def simpan_ke_sheets(hasil):
+    """Menambahkan baris penilaian ke Google Sheets. Mengembalikan (berhasil, pesan)."""
+    try:
+        akun = dict(st.secrets["gcp_service_account"])
+        url = st.secrets["sheet"]["url"]
+    except Exception:
+        return False, "belum diatur"
+    try:
+        import gspread
+        ws = gspread.service_account_from_dict(akun).open_by_url(url).sheet1
+        if ws.row_values(1) != KOLOM_SHEET:
+            if any(ws.row_values(1)):
+                return False, "baris pertama Google Sheets tidak sesuai, gunakan sheet kosong"
+            ws.update([KOLOM_SHEET], "A1")
+        isi = hasil.reindex(columns=KOLOM_SHEET).astype(object).where(hasil.reindex(columns=KOLOM_SHEET).notna(), "")
+        ws.append_rows([[int(v) if isinstance(v, float) and v.is_integer() else v if isinstance(v, (int, float, str)) else str(v) for v in baris] for baris in isi.values.tolist()], value_input_option="RAW")
+        return True, "Tersimpan ke Google Sheets"
+    except Exception as e:
+        return False, f"gagal menyimpan ke Google Sheets ({type(e).__name__})"
+
+
 st.set_page_config(page_title="Faktor yang Berkaitan dengan Harga Emas", layout="wide")
 
 
@@ -145,7 +170,7 @@ CATATAN_GOLD = "Harga emas hari ini tetap ikut diperhitungkan, tetapi tidak dita
 
 if halaman == "Panduan":
     st.title("Faktor apa yang paling berkaitan dengan perkiraan harga emas?")
-    st.write("Penelitian ini menganalisis data harian 2019-2026 untuk memperkirakan harga emas satu hari ke depan dari sembilan faktor. Hal yang perlu diperhatikan oleh Bapak/Ibu adalah: apakah faktor-faktor yang muncul dalam hasil ini sesuai dengan pengetahuan dan pengalaman Bapak/Ibu tentang pergerakan harga emas.")
+    st.write("Penelitian ini menganalisis data harian 2019-2026 untuk memperkirakan harga emas satu hari ke depan dari sembilan faktor. Bapak/Ibu tidak perlu memahami cara perhitungannya. Yang kami minta adalah penilaian: apakah faktor-faktor yang muncul dalam hasil ini sesuai dengan pengetahuan dan pengalaman Bapak/Ibu tentang pergerakan harga emas.")
     st.subheader("Cara membaca angkanya")
     contoh = tampil[0]
     st.info(f"Contoh: {lb(contoh)} bernilai {pengaruh[0]:.2f} USD. Artinya, faktor ini rata-rata menggeser perkiraan harga emas sekitar {pengaruh[0]:.2f} USD per hari, bisa naik atau turun. Semakin besar angkanya, semakin besar perannya dalam perkiraan harga emas.")
@@ -386,7 +411,7 @@ else:
         if kosong or top3 is None or urutan is None:
             st.warning("Penilaian belum disimpan. Mohon lengkapi pilihan kesesuaian dan hubungan untuk semua faktor, serta dua pertanyaan keseluruhan.")
         else:
-            ringkas = {"responden": pakar, "tanggal": str(tgl), "gold_ditampilkan": sertakan_gold}
+            ringkas = {"responden": pakar, "tanggal": str(tgl), "waktu_simpan": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "gold_ditampilkan": sertakan_gold}
             baris = [{**ringkas, "faktor": lb(n), "peringkat_model": rk, "pengaruh_usd": round(float(pengaruh[rk - 1]), 2), "porsi_persen": round(float(porsi[rk - 1]), 1), "arah_hasil": ah_, "kesesuaian": s_, "arah_pakar": ap, "peringkat_pakar": "" if rp == "-" else rp, "catatan": c_} for n, rk, ah_, s_, ap, rp, c_ in jawaban]
             for t, nilai_j in (("Tiga faktor teratas", top3), ("Urutan keseluruhan", urutan), ("Faktor yang perlu naik/turun", beda), ("Faktor tambahan", tambah)):
                 baris.append({**ringkas, "faktor": f"(umum) {t}", "kesesuaian": nilai_j})
@@ -400,13 +425,20 @@ else:
             nama_file = f"penilaian_{pakar[:7].replace(' ', '_').lower()}_{datetime.now():%Y%m%d_%H%M%S}.csv"
             st.session_state["hasil_csv"] = hasil.to_csv(index=False).encode("utf-8-sig")
             st.session_state["nama_file"] = nama_file
+            ok, pesan = simpan_ke_sheets(hasil)
+            lokal = True
             try:
                 folder = BASE / "hasil_penilaian"
                 folder.mkdir(exist_ok=True)
                 (folder / nama_file).write_bytes(st.session_state["hasil_csv"])
-                st.success(f"Penilaian tersimpan di folder hasil_penilaian sebagai {nama_file}. Terima kasih.")
             except OSError:
-                st.warning("Penilaian belum tersimpan di komputer. Unduh file di bawah ini.")
+                lokal = False
+            if ok:
+                st.success("Penilaian tersimpan ke Google Sheets. Terima kasih.")
+            elif pesan == "belum diatur" and lokal:
+                st.info(f"Penilaian tersimpan di folder hasil_penilaian sebagai {nama_file}. Google Sheets belum diatur, jadi kalau dashboard dibuka online, mohon unduh file di bawah ini.")
+            else:
+                st.warning(f"Penilaian belum tersimpan otomatis: {pesan}. Mohon unduh file di bawah ini.")
     if "hasil_csv" in st.session_state:
         st.download_button("Unduh hasil penilaian (CSV)", st.session_state["hasil_csv"], st.session_state["nama_file"], "text/csv")
         if st.session_state.get("kesesuaian") is not None:
