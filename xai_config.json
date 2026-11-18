@@ -1,0 +1,22 @@
+{
+  "model": "Hybrid concat S2",
+  "k_models": 300,
+  "b_models": 1000,
+  "n_background": 30,
+  "bg_seed": 2026,
+  "xgb": {
+    "n_estimators": 150,
+    "lr": 0.08,
+    "max_depth": 10,
+    "subsample": 0.5,
+    "colsample": 0.5,
+    "reg_lambda": 1.0
+  },
+  "feat_idx": 5,
+  "selisih_rata2_ke_1000_usd": 0.7193813381729172,
+  "selisih_maks_ke_1000_usd": 3.982554300004267,
+  "mae_k_model": 21.261637161730878,
+  "mae_1000_model": 21.38346897187416,
+  "spearman_background": 0.9833333333333333,
+  "maks_selisih_model_vs_tersimpan": 0.0
+}

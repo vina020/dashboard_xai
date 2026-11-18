@@ -1,4 +1,5 @@
 """Dashboard pendamping wawancara pakar (Subbab 3.2.8). Jalankan: streamlit run app.py"""
+import json
 from datetime import date, datetime
 from pathlib import Path
 
@@ -9,8 +10,12 @@ import plotly.graph_objects as go
 import streamlit as st
 
 BASE = Path(__file__).parent
-EMAS, ABU, NAIK, TURUN, HIJAU = "#B8860B", "#7A8594", "#C0392B", "#2C6FAB", "#2E8B57"
-ORANYE = "#D9822B"
+EMAS, ABU, NAIK, TURUN, HIJAU = "#E9B000", "#9B5DE5", "#E63946", "#1D7CF2", "#06A77D"
+ORANYE, GARIS, UNGU, TOSKA = "#F77F00", "#3D348B", "#8338EC", "#00A6A6"
+FAKTOR_WARNA = {"Gold": "#E9B000", "Silver": "#00A6A6", "Crude_Oil": "#F77F00", "EUR_USD": "#3A86FF", "USD_CNY": "#FF006E",
+                "SP500": "#8338EC", "Inflation": "#2DC653", "Iron_Ore": "#B5651D", "GPR": "#C1121F"}
+CADANGAN = ["#F15BB5", "#00BBF9", "#9EF01A", "#FB5607", "#7209B7", "#06D6A0"]
+SKALA_WARNA = [[0, "#1D7CF2"], [0.5, "#FFD166"], [1, "#E63946"]]
 IMP_COL = "Mean|SHAP| (USD)"
 LABEL = {
     "Gold": "Harga emas hari ini", "Silver": "Harga perak", "Crude_Oil": "Harga minyak mentah", "EUR_USD": "Nilai tukar EUR/USD",
@@ -60,6 +65,10 @@ def lb(n):
     return LABEL.get(n, n)
 
 
+def warna(n):
+    return FAKTOR_WARNA.get(n, CADANGAN[sum(map(ord, n)) % len(CADANGAN)])
+
+
 def wajib(nama):
     path = BASE / nama
     if not path.exists():
@@ -101,7 +110,15 @@ def muat_data():
         ke_emas, sumber_emas = test[fitur].corrwith(test["Target"]), "data uji"
     else:
         ke_emas, sumber_emas = korelasi["Gold"], "data latih" if sumber_kor == "data latih" else "data uji"
-    return shap_df, imp, test, nilai, fitur, asli, korelasi, sumber_kor, ke_emas, sumber_emas
+    harian = None
+    if (BASE / "prediksi_harian.csv").exists():
+        harian = pd.read_csv(BASE / "prediksi_harian.csv", parse_dates=["Date", "date_next"])
+        hilang = [c for c in ["Date", "gold_today", "date_next", "pred_next", "actual_next"] if c not in harian]
+        if hilang:
+            raise ValueError(f"Kolom prediksi_harian.csv tidak ditemukan: {hilang}")
+        if len(harian) != len(shap_df) or not harian["Date"].equals(shap_df["Date"]):
+            raise ValueError("Tanggal prediksi_harian.csv dan xai_shap_values.csv tidak sama. Pastikan keduanya dari model dan data uji yang sama.")
+    return shap_df, imp, test, nilai, fitur, asli, korelasi, sumber_kor, ke_emas, sumber_emas, harian
 
 
 def tampilkan(fig, key, tinggi=440, kanan=10, legenda=False):
@@ -110,8 +127,32 @@ def tampilkan(fig, key, tinggi=440, kanan=10, legenda=False):
     st.plotly_chart(fig, key=key)
 
 
+CLS_URUT = ["0.9", "0.6", "0.3"]
+
+
+@st.cache_data
+def harga_emas_harian(harian, test):
+    """Harga emas sebenarnya (USD) untuk SEMUA hari perdagangan, dari kolom Gold di train/val/test_scaled.
+    Skala 0-1 dikembalikan ke USD dengan hubungan linear yang dicocokkan pada 200 hari uji (gold_today)."""
+    gs = test["Gold"].to_numpy(float); gu = harian["gold_today"].to_numpy(float)
+    a, b = np.polyfit(gs, gu, 1)
+    if np.abs(a * gs + b - gu).max() > 0.01:
+        raise ValueError("Kolom Gold di test_scaled.csv tidak cocok dengan gold_today di prediksi_harian.csv.")
+    bagian, sumber = [test[["Date", "Gold"]]], ["data uji"]
+    for nama, label in [("train_scaled.csv", "data latih"), ("val_scaled.csv", "data validasi")]:
+        if (BASE / nama).exists():
+            bagian.append(pd.read_csv(BASE / nama, usecols=["Date", "Gold"], parse_dates=["Date"])); sumber.append(label)
+    semua = pd.concat(bagian).drop_duplicates("Date").sort_values("Date")
+    seri = pd.Series(a * semua["Gold"].to_numpy(float) + b, index=pd.DatetimeIndex(semua["Date"]))
+    besok = harian.dropna(subset=["date_next"])                                 # harga hari berikutnya dari hari uji
+    seri = pd.concat([seri, pd.Series(besok["actual_next"].to_numpy(float), index=pd.DatetimeIndex(besok["date_next"]))])
+    seri = seri[~seri.index.duplicated(keep="first")].sort_index()
+    lengkap = len(sumber) == 3
+    return seri, ("gabungan " + ", ".join(sumber)) if lengkap else ("hanya " + ", ".join(sumber) + "; tambahkan train_scaled.csv dan val_scaled.csv agar semua hari tampil")
+
+
 try:
-    df, imp, test, nilai, fitur, asli, korelasi, sumber_kor, ke_emas, sumber_emas = muat_data()
+    df, imp, test, nilai, fitur, asli, korelasi, sumber_kor, ke_emas, sumber_emas, harian = muat_data()
 except ValueError as e:
     st.error(str(e))
     st.stop()
@@ -157,7 +198,7 @@ def peran(q):
 
 
 st.sidebar.title("Faktor harga emas")
-halaman = st.sidebar.radio("Tahapan", ["Panduan", "Peringkat faktor", "Keterkaitan faktor", "Bandingkan faktor", "Contoh per tanggal", "Penilaian pakar"])
+halaman = st.sidebar.radio("Tahapan", ["Panduan", "Prediksi harian", "Peringkat faktor", "Keterkaitan faktor", "Bandingkan faktor", "Contoh per tanggal", "Penilaian pakar"])
 ada_gold = "Gold" in fitur
 sertakan_gold = st.sidebar.checkbox("Tampilkan harga emas hari ini", value=False) if ada_gold else False
 st.sidebar.caption("Hasil ini berasal dari analisis data historis 2019-2026. Hasil menunjukkan keterkaitan, bukan bukti sebab-akibat, bukan ramalan harga masa depan, dan bukan rekomendasi investasi.")
@@ -175,18 +216,234 @@ if halaman == "Panduan":
     contoh = tampil[0]
     st.info(f"Contoh: {lb(contoh)} bernilai {pengaruh[0]:.2f} USD. Artinya, faktor ini rata-rata menggeser perkiraan harga emas sekitar {pengaruh[0]:.2f} USD per hari, bisa naik atau turun. Semakin besar angkanya, semakin besar perannya dalam perkiraan harga emas.")
     st.subheader("Tahapan sesi")
-    st.markdown("1. **Peringkat faktor:** melihat urutan faktor dari yang paling besar pengaruhnya.\n2. **Keterkaitan faktor:** melihat faktor yang bergerak bersama harga emas dan satu sama lain.\n3. **Bandingkan faktor:** melihat perbedaan dua faktor.\n4. **Contoh per tanggal:** melihat faktor yang berperan pada hari tertentu.\n5. **Penilaian pakar:** menilai kesesuaian hasil dengan pengetahuan Bapak/Ibu tentang pasar emas.")
+    st.markdown("1. **Prediksi harian:** melihat harga emas hari ini, perkiraan harga besok, dan faktor yang paling berpengaruh setiap hari.\n2. **Peringkat faktor:** melihat urutan faktor dari yang paling besar pengaruhnya.\n3. **Keterkaitan faktor:** melihat faktor yang bergerak bersama harga emas dan satu sama lain.\n4. **Bandingkan faktor:** melihat perbedaan dua faktor.\n5. **Contoh per tanggal:** melihat faktor yang berperan pada hari tertentu.\n6. **Penilaian pakar:** menilai kesesuaian hasil dengan pengetahuan Bapak/Ibu tentang pasar emas.")
     st.subheader("Yang perlu diingat")
     st.markdown(f"- Rata-rata perkiraan harga emas meleset sekitar **{mae:.2f} USD ({mape:.2f}%)** dari harga aktual pada data uji.\n- Peringkat menunjukkan faktor yang paling berkaitan dengan perkiraan harga emas, **bukan bukti bahwa faktor tersebut menyebabkan** harga emas bergerak.\n- Faktor yang bergerak bersama bisa berbagi pengaruh, sehingga pengaruh masing-masing bisa terlihat lebih kecil atau lebih besar.\n- Tidak ada jawaban benar atau salah. Pendapat yang berbeda dari model juga merupakan hasil penting.")
     if not sertakan_gold and ada_gold:
         st.caption(CATATAN_GOLD)
+
+elif halaman == "Prediksi harian":
+    st.title("Harga emas hari ini dan perkiraan harga besok")
+    if harian is None:
+        st.warning("File prediksi_harian.csv belum ada. Jalankan notebook buat_prediksi_harian.ipynb, lalu simpan prediksi_harian.csv di folder yang sama dengan app.py.")
+        st.stop()
+    st.write(f"Halaman ini menampilkan {len(harian)} hari pada data uji. Untuk setiap hari, harga emas hari itu dipakai untuk memperkirakan harga emas pada hari perdagangan berikutnya, lalu dibandingkan dengan harga yang sebenarnya terjadi.")
+    st.caption("Ini adalah pengujian pada data historis yang sudah diketahui jawabannya, bukan ramalan harga di masa depan. Data uji dipilih acak dari 2019-2026, jadi tanggalnya tidak selalu berurutan.")
+
+    hj, hp, ha = harian["gold_today"].to_numpy(), harian["pred_next"].to_numpy(), harian["actual_next"].to_numpy()
+    ada_int = "lo_0.9" in harian and "hi_0.9" in harian
+    lo9, hi9 = (harian["lo_0.9"].to_numpy(), harian["hi_0.9"].to_numpy()) if ada_int else (None, None)
+    tgl_besok = harian["date_next"].dt.strftime("%Y-%m-%d").fillna("hari berikutnya").tolist()
+    e_h = ha - hp
+    gap_xai = np.abs(hp - p)
+    if gap_xai.max() > 0.5:
+        k_model = None
+        try:
+            k_model = json.loads((BASE / "xai_config.json").read_text()).get("k_models")
+        except Exception:
+            pass
+        if k_model:
+            st.info(f"Angka perkiraan berasal dari rata-rata 1.000 model. Faktor pengaruh dihitung dari rata-rata {k_model} model pertama, "
+                    f"yang perkiraannya rata-rata berbeda {gap_xai.mean():,.2f} USD (paling jauh {gap_xai.max():,.2f} USD).")
+        else:
+            st.warning(f"Perkiraan di prediksi_harian.csv berbeda dengan perkiraan pada hasil analisis faktor (maks {gap_xai.max():.2f} USD). Pastikan keduanya berasal dari model yang sama.")
+    arah_ok = np.mean(np.sign(hp - hj) == np.sign(ha - hj)) * 100
+    k = st.columns(4)
+    k[0].metric("Rata-rata meleset", f"{np.abs(e_h).mean():,.2f} USD")
+    k[1].metric("Rata-rata meleset (%)", f"{np.mean(np.abs(e_h / ha)) * 100:.2f}%")
+    k[2].metric("Arah naik/turun tepat", f"{arah_ok:.1f}%")
+    if ada_int:
+        k[3].metric("Harga sebenarnya di dalam rentang 90%", f"{np.mean((ha >= lo9) & (ha <= hi9)) * 100:.1f}%")
+
+    idx_f = [fitur.index(n) for n in tampil]
+    sub = phi[:, idx_f]
+    top = np.abs(sub).argmax(1)
+    top_kode = [tampil[j] for j in top]
+
+    st.subheader("Pilih hari")
+    pintas = {"Pilih tanggal": None, "Perkiraan paling meleset": int(np.abs(e_h).argmax()), "Harga emas tertinggi": int(hj.argmax()), "Harga emas terendah": int(hj.argmin())}
+    cara = st.radio("Tampilkan", list(pintas), horizontal=True, key="pintas_harian")
+    i = tanggal.index(st.selectbox("Tanggal (hari ini)", tanggal, key="tgl_harian")) if pintas[cara] is None else pintas[cara]
+
+    mode_grafik = st.radio("Grafik", ["1 hari", "Rentang 1 minggu"], horizontal=True, key="mode_grafik_harian")
+    hari_ini, besok = harian["Date"].iloc[i], harian["date_next"].iloc[i]
+    if pd.isna(besok):
+        besok = hari_ini + pd.Timedelta(days=1)
+
+    if mode_grafik == "1 hari":
+        fig = go.Figure()
+        if ada_int:
+            for cl, alpha in [("0.9", 0.16), ("0.6", 0.24), ("0.3", 0.34)]:
+                if f"lo_{cl}" in harian and f"hi_{cl}" in harian:
+                    lo_c, hi_c = float(harian[f"lo_{cl}"].iloc[i]), float(harian[f"hi_{cl}"].iloc[i])
+                    fig.add_trace(go.Scatter(x=[besok, besok], y=[lo_c, hi_c], mode="lines", line=dict(color=f"rgba(131,56,236,{alpha + 0.3})", width=28 - 8 * CLS_URUT.index(cl)),
+                                             name=f"Rentang perkiraan {int(float(cl) * 100)}%",
+                                             hovertemplate=f"Rentang {int(float(cl) * 100)}%: {lo_c:,.2f} - {hi_c:,.2f} USD<extra></extra>"))
+        fig.add_trace(go.Scatter(x=[hari_ini, besok], y=[hj[i], hp[i]], mode="lines+markers+text", name="Perkiraan harga besok",
+                                 line=dict(color=UNGU, width=3, dash="dash"), marker=dict(size=[13, 15], color=[EMAS, UNGU]),
+                                 text=["", f"{hp[i]:,.2f}"], textposition="middle left", textfont=dict(color=UNGU, size=13),
+                                 hovertemplate="Perkiraan: %{y:,.2f} USD<extra></extra>"))
+        fig.add_trace(go.Scatter(x=[hari_ini, besok], y=[hj[i], ha[i]], mode="lines+markers+text", name="Harga sebenarnya besok",
+                                 line=dict(color=TOSKA, width=3), marker=dict(size=[13, 15], color=[EMAS, TOSKA], symbol=["circle", "diamond"]),
+                                 text=[f"{hj[i]:,.2f}", f"{ha[i]:,.2f}"], textposition=["middle left", "middle right"], textfont=dict(color=[EMAS, TOSKA], size=13),
+                                 hovertemplate="Harga: %{y:,.2f} USD<extra></extra>"))
+        fig.update_xaxes(title_text="", tickvals=[hari_ini, besok], ticktext=[f"Hari ini<br>{hari_ini:%d %b %Y}", f"Besok<br>{besok:%d %b %Y}"],
+                         range=[hari_ini - (besok - hari_ini) * 0.6, besok + (besok - hari_ini) * 0.6])
+        fig.update_yaxes(title_text="Harga emas (USD)")
+        fig.update_layout(hovermode="closest")
+        tampilkan(fig, f"harian_1hari_{i}", 460, legenda=True)
+        st.caption("Titik kuning adalah harga emas hari ini. Garis ungu putus-putus menuju perkiraan harga besok, garis toska menuju harga yang sebenarnya terjadi. Pita ungu adalah rentang perkiraan (makin gelap makin sempit).")
+    else:
+        awal, akhir = hari_ini - pd.Timedelta(days=3), max(hari_ini + pd.Timedelta(days=3), besok)
+        seri, sumber_seri = harga_emas_harian(harian, test)
+        minggu = seri[(seri.index >= awal) & (seri.index <= akhir)]
+        dlm = harian[(harian["Date"] >= awal) & (harian["Date"] <= akhir)].index.to_numpy()
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=minggu.index, y=minggu.values, mode="lines+markers", name="Harga emas sebenarnya (harian)",
+                                 line=dict(color=EMAS, width=2.5), marker=dict(size=8),
+                                 hovertemplate="%{x|%a, %d %b %Y}<br>Harga emas: %{y:,.2f} USD<extra></extra>"))
+        if ada_int:
+            for j in dlm:
+                bsk = harian["date_next"].iloc[j] if pd.notna(harian["date_next"].iloc[j]) else harian["Date"].iloc[j] + pd.Timedelta(days=1)
+                fig.add_trace(go.Scatter(x=[bsk, bsk], y=[lo9[j], hi9[j]], mode="lines", line=dict(color="rgba(131,56,236,0.35)", width=18),
+                                         name="Rentang perkiraan 90%", showlegend=bool(j == dlm[0]),
+                                         hovertemplate=f"Rentang 90%: {lo9[j]:,.2f} - {hi9[j]:,.2f} USD<extra></extra>"))
+        for j in dlm:
+            bsk = harian["date_next"].iloc[j] if pd.notna(harian["date_next"].iloc[j]) else harian["Date"].iloc[j] + pd.Timedelta(days=1)
+            fig.add_trace(go.Scatter(x=[harian["Date"].iloc[j], bsk], y=[hj[j], hp[j]], mode="lines+markers", name="Perkiraan harga besok",
+                                     showlegend=bool(j == dlm[0]), line=dict(color=UNGU, width=3 if j == i else 2, dash="dash"),
+                                     marker=dict(size=[0, 14 if j == i else 10], color=UNGU, symbol="star"),
+                                     customdata=[[tanggal[j], lb(top_kode[j])]] * 2,
+                                     hovertemplate="Perkiraan dari %{customdata[0]}: %{y:,.2f} USD<br>Faktor paling berpengaruh: %{customdata[1]}<extra></extra>"))
+        fig.add_vrect(x0=hari_ini - pd.Timedelta(hours=12), x1=hari_ini + pd.Timedelta(hours=12), fillcolor=NAIK, opacity=0.10, line_width=0)
+        fig.update_xaxes(title_text="", type="date", dtick=86400000, tickformat="%a<br>%d %b", range=[awal - pd.Timedelta(hours=12), akhir + pd.Timedelta(hours=12)])
+        fig.update_yaxes(title_text="Harga emas (USD)")
+        fig.update_layout(hovermode="closest")
+        tampilkan(fig, f"harian_minggu_{i}", 460, legenda=True)
+        lain = len(dlm) - 1
+        st.caption(f"Rentang {awal:%d %b} - {akhir:%d %b %Y}. Garis kuning adalah harga emas sebenarnya setiap hari perdagangan ({sumber_seri}). "
+                   f"Bintang ungu adalah perkiraan model untuk hari berikutnya; kolom merah muda menandai hari yang dipilih."
+                   + (f" Ada {lain} hari uji lain di minggu ini yang juga ditampilkan perkiraannya." if lain > 0 else " Hari lain di minggu ini bukan bagian data uji, jadi tidak punya perkiraan."))
+
+    st.subheader(f"Hari ini: {tanggal[i]}  →  perkiraan untuk {tgl_besok[i]}")
+    k = st.columns(4)
+    k[0].metric("Harga emas hari ini", f"{hj[i]:,.2f} USD")
+    k[1].metric("Perkiraan harga besok", f"{hp[i]:,.2f} USD", f"{hp[i] - hj[i]:+,.2f} USD dari hari ini")
+    k[2].metric("Harga sebenarnya besok", f"{ha[i]:,.2f} USD", f"{ha[i] - hj[i]:+,.2f} USD dari hari ini")
+    k[3].metric("Selisih perkiraan", f"{hp[i] - ha[i]:+,.2f} USD", delta_color="off")
+    if ada_int:
+        st.write(f"Rentang perkiraan 90%: **{lo9[i]:,.2f} - {hi9[i]:,.2f} USD**. Harga sebenarnya {'berada di dalam' if lo9[i] <= ha[i] <= hi9[i] else 'berada di luar'} rentang ini.")
+
+    s_i = sub[i]; o = np.argsort(np.abs(s_i))[::-1]
+    v, kode = s_i[o], [tampil[j] for j in o]
+    naik = [lb(kode[j]) for j in range(len(v)) if v[j] > 0][:2]
+    turun = [lb(kode[j]) for j in range(len(v)) if v[j] < 0][:2]
+    st.write(f"Faktor paling berpengaruh pada hari ini adalah **{lb(kode[0])}** ({v[0]:+,.2f} USD). Pendorong perkiraan lebih tinggi: **{', '.join(naik) or 'tidak ada'}**. Pendorong perkiraan lebih rendah: **{', '.join(turun) or 'tidak ada'}**.")
+    isi = [float(nilai[n].iloc[i]) for n in kode]
+    fig = go.Figure(go.Bar(
+        x=v, y=[lb(n) for n in kode], orientation="h", marker_color=[warna(n) for n in kode],
+        text=[f"{a:+,.2f} USD" for a in v], textposition="outside", cliponaxis=False, customdata=isi,
+        hovertemplate="<b>%{y}</b><br>Dorongan ke perkiraan harga emas: %{x:+,.2f} USD<br>Nilai faktor: %{customdata:,.4f}<extra></extra>",
+    ))
+    fig.add_vline(x=0, line_color=GARIS, line_width=1)
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(title_text="Dorongan ke perkiraan harga emas besok (USD)")
+    tampilkan(fig, f"faktor_harian_{i}_{sertakan_gold}", 420, kanan=90)
+    keterangan = "Batang ke kanan mendorong perkiraan lebih tinggi dari rata-ratanya, batang ke kiri mendorong lebih rendah. Setiap faktor punya warnanya sendiri."
+    if ada_gold and not sertakan_gold:
+        keterangan += f" Pengaruh harga emas hari ini ({float(phi[i, fitur.index('Gold')]):+,.2f} USD) tidak ditampilkan."
+    st.caption(keterangan)
+
+    st.subheader("Perubahan pengaruh faktor dibanding hari lain")
+    urut = np.argsort(harian["Date"].to_numpy())
+    pos = int(np.flatnonzero(urut == i)[0])
+    pilihan_banding = ["Hari uji sebelumnya", "Pilih tanggal lain"]
+    cara_b = st.radio("Bandingkan dengan", pilihan_banding, horizontal=True, key="cara_banding")
+    if cara_b == "Hari uji sebelumnya":
+        if pos == 0:
+            st.info("Hari ini adalah hari uji paling awal, jadi tidak ada hari uji sebelumnya. Pilih tanggal lain untuk membandingkan.")
+            j = None
+        else:
+            j = int(urut[pos - 1])
+    else:
+        lain = [t for t in tanggal if t != tanggal[i]]
+        j = tanggal.index(st.selectbox("Tanggal pembanding", lain, index=max(0, min(len(lain) - 1, pos - 1)), key="tgl_banding"))
+    if j is not None:
+        jarak = (harian["Date"].iloc[i] - harian["Date"].iloc[j]).days
+        s_j = sub[j]; d = s_i - s_j
+        o2 = np.argsort(np.abs(d))[::-1]; kode2 = [tampil[q] for q in o2]
+        k = st.columns(3)
+        k[0].metric("Tanggal pembanding", tanggal[j], f"{abs(jarak)} hari {'sebelumnya' if jarak > 0 else 'sesudahnya'}", delta_color="off")
+        k[1].metric("Harga emas hari itu", f"{hj[j]:,.2f} USD", f"{hj[i] - hj[j]:+,.2f} USD ke hari ini", delta_color="off")
+        k[2].metric("Perkiraan besok pada hari itu", f"{hp[j]:,.2f} USD", f"{hp[i] - hp[j]:+,.2f} USD ke hari ini", delta_color="off")
+        fig = go.Figure(go.Bar(
+            x=d[o2], y=[lb(n) for n in kode2], orientation="h", marker_color=[warna(n) for n in kode2],
+            text=[f"{v:+,.2f} USD" for v in d[o2]], textposition="outside", cliponaxis=False,
+            customdata=np.column_stack([s_j[o2], s_i[o2]]),
+            hovertemplate="<b>%{y}</b><br>" + f"{tanggal[j]}" + ": %{customdata[0]:+,.2f} USD<br>" + f"{tanggal[i]}" + ": %{customdata[1]:+,.2f} USD<br>Perubahan: %{x:+,.2f} USD<extra></extra>",
+        ))
+        fig.add_vline(x=0, line_color=GARIS, line_width=1)
+        fig.update_yaxes(autorange="reversed")
+        fig.update_xaxes(title_text=f"Perubahan dorongan dari {tanggal[j]} ke {tanggal[i]} (USD)")
+        tampilkan(fig, f"banding_{i}_{j}_{sertakan_gold}", 400, kanan=90)
+        naik_b = [(lb(tampil[q]), d[q]) for q in o2 if d[q] > 0][:2]
+        turun_b = [(lb(tampil[q]), d[q]) for q in o2 if d[q] < 0][:2]
+        teks = lambda L: ", ".join(f"**{n}** ({v:+,.2f} USD)" for n, v in L) or "tidak ada"
+        st.write(f"Dibanding {tanggal[j]}, faktor yang pengaruhnya paling bertambah ke arah perkiraan lebih tinggi: {teks(naik_b)}. "
+                 f"Yang paling bergeser ke arah perkiraan lebih rendah: {teks(turun_b)}. "
+                 f"Faktor paling berpengaruh: **{lb(top_kode[j])}** pada {tanggal[j]} dan **{lb(top_kode[i])}** pada {tanggal[i]}.")
+        ket_b = ("Batang ke kanan berarti faktor itu mendorong perkiraan lebih tinggi dibanding hari pembanding, batang ke kiri berarti mendorong lebih rendah. "
+                 "Arahkan kursor ke batang untuk melihat besar dorongan pada kedua tanggal.")
+        if jarak > 7:
+            ket_b += f" Data uji dipilih acak, jadi hari uji sebelumnya berjarak {jarak} hari; perubahan bisa juga mencerminkan perubahan kondisi pasar selama rentang itu."
+        st.caption(ket_b)
+
+    st.subheader("Faktor paling berpengaruh di setiap hari")
+    st.write("Setiap titik adalah satu hari. Warna dan baris menunjukkan faktor yang paling berpengaruh pada hari itu, dan ukuran titik menunjukkan besar pengaruhnya.")
+    besar = np.abs(sub[np.arange(len(sub)), top])
+    ukuran = 6 + 14 * (besar - besar.min()) / ((besar.max() - besar.min()) or 1)
+    fig = go.Figure()
+    for n in tampil:
+        msk = np.array(top_kode) == n
+        if not msk.any():
+            continue
+        fig.add_trace(go.Scatter(
+            x=harian["Date"][msk], y=[lb(n)] * int(msk.sum()), mode="markers", name=lb(n), marker=dict(color=warna(n), size=ukuran[msk], opacity=0.85),
+            customdata=np.column_stack([np.array(tanggal)[msk], sub[msk, tampil.index(n)]]),
+            hovertemplate="<b>%{customdata[0]}</b><br>" + lb(n) + ": %{customdata[1]:+,.2f} USD<extra></extra>",
+        ))
+    fig.update_xaxes(title_text="Tanggal (hari ini)", type="date")
+    tampilkan(fig, f"top_harian_{sertakan_gold}", 360)
+
+    hit = pd.Series(top_kode).value_counts().reindex(tampil).fillna(0).astype(int)
+    hit = hit[hit > 0].sort_values(ascending=False)
+    fig = go.Figure(go.Bar(x=hit.values, y=[lb(n) for n in hit.index], orientation="h", marker_color=[warna(n) for n in hit.index],
+                           text=[f"{c} hari ({c / len(sub) * 100:.0f}%)" for c in hit.values], textposition="outside", cliponaxis=False,
+                           hovertemplate="<b>%{y}</b><br>Paling berpengaruh pada %{x} hari<extra></extra>"))
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(title_text="Jumlah hari sebagai faktor paling berpengaruh")
+    tampilkan(fig, f"hitung_top_{sertakan_gold}", 340, kanan=110)
+    if ada_gold and not sertakan_gold:
+        st.caption(CATATAN_GOLD)
+
+    st.subheader(f"Tabel prediksi {len(harian)} hari")
+    tabel = pd.DataFrame({
+        "Tanggal (hari ini)": tanggal, "Harga emas hari ini (USD)": np.round(hj, 2), "Tanggal besok": tgl_besok,
+        "Perkiraan besok (USD)": np.round(hp, 2),
+        **({"Batas bawah 90% (USD)": np.round(lo9, 2), "Batas atas 90% (USD)": np.round(hi9, 2)} if ada_int else {}),
+        "Harga sebenarnya besok (USD)": np.round(ha, 2), "Selisih (USD)": np.round(hp - ha, 2),
+        "Arah perkiraan": np.where(hp >= hj, "naik", "turun"), "Arah sebenarnya": np.where(ha >= hj, "naik", "turun"),
+        "Faktor paling berpengaruh": [lb(n) for n in top_kode], "Pengaruhnya (USD)": np.round(sub[np.arange(len(sub)), top], 2),
+    })
+    st.dataframe(tabel, hide_index=True)
+    st.download_button("Unduh tabel prediksi (CSV)", tabel.to_csv(index=False).encode("utf-8-sig"), "prediksi_harian_200_hari.csv", "text/csv")
 
 elif halaman == "Peringkat faktor":
     st.title("Peringkat faktor yang berkaitan dengan harga emas")
     st.write(f"Berdasarkan hasil analisis, faktor dengan pengaruh terbesar terhadap perkiraan harga emas{'' if sertakan_gold else ' selain harga emas hari ini'} adalah **{lb(tampil[0])}**, diikuti **{lb(tampil[1])}** dan **{lb(tampil[2])}**.")
     nama = [lb(n) for n in tampil]
     fig = go.Figure(go.Bar(
-        x=pengaruh, y=nama, orientation="h", marker_color=[EMAS if n == "Gold" else ABU for n in tampil],
+        x=pengaruh, y=nama, orientation="h", marker_color=[warna(n) for n in tampil],
         text=[f"{v:.2f} USD ({q:.1f}%)" for v, q in zip(pengaruh, porsi)], textposition="outside", cliponaxis=False,
         customdata=[[arah(n), KET.get(n, "")] for n in tampil],
         hovertemplate="<b>%{y}</b><br>Rata-rata pengaruh: %{x:.2f} USD<br>%{customdata[1]}<br>%{customdata[0]}<extra></extra>",
@@ -207,12 +464,12 @@ elif halaman == "Peringkat faktor":
         rapat = hist[np.clip(np.digitize(s_, tepi) - 1, 0, len(hist) - 1)] / max(hist.max(), 1)
         fig.add_trace(go.Scatter(
             x=s_, y=r_ + rng.uniform(-0.38, 0.38, len(s_)) * rapat, mode="markers", name=lb(n),
-            marker=dict(size=7, color=np.clip(test[n], 0, 1), colorscale="RdBu_r", cmin=0, cmax=1, showscale=r_ == 0,
+            marker=dict(size=7, color=np.clip(test[n], 0, 1), colorscale=SKALA_WARNA, cmin=0, cmax=1, showscale=r_ == 0,
                         colorbar=dict(title="Nilai faktor", tickvals=[0, 0.5, 1], ticktext=["Rendah", "Sedang", "Tinggi"])),
             customdata=[[lb(n), tanggal[i], float(nilai[n].iloc[i]), y[i], p[i]] for i in range(len(df))],
             hovertemplate="<b>%{customdata[0]}</b><br>Tanggal: %{customdata[1]}<br>Dorongan ke perkiraan harga emas: %{x:+.2f} USD<br>Nilai faktor: %{customdata[2]:,.4f}<br>Harga emas sebenarnya: %{customdata[3]:,.2f} USD<br>Perkiraan harga emas: %{customdata[4]:,.2f} USD<extra></extra>",
         ))
-    fig.add_vline(x=0, line_color="black", line_width=1)
+    fig.add_vline(x=0, line_color=GARIS, line_width=1)
     fig.update_yaxes(tickmode="array", tickvals=list(range(len(tampil))), ticktext=nama, autorange="reversed")
     fig.update_xaxes(title_text="Dorongan ke perkiraan harga emas (USD)")
     tampilkan(fig, f"beeswarm_{sertakan_gold}", 520)
@@ -237,7 +494,7 @@ elif halaman == "Keterkaitan faktor":
         customdata=[[kekuatan(ke_emas[n]), peringkat_model[n]] for n in urut],
         hovertemplate="<b>%{y}</b><br>Korelasi: %{x:+.2f} (%{customdata[0]})<br>Peringkat pengaruh: %{customdata[1]}<extra></extra>",
     ))
-    fig.add_vline(x=0, line_color="black", line_width=1)
+    fig.add_vline(x=0, line_color=GARIS, line_width=1)
     fig.update_yaxes(autorange="reversed")
     fig.update_xaxes(title_text="Korelasi dengan harga emas esok hari", range=[-1.1, 1.1])
     tampilkan(fig, f"kor_emas_{sertakan_gold}", kanan=40)
@@ -257,7 +514,7 @@ elif halaman == "Keterkaitan faktor":
     z = korelasi.loc[tampil, tampil].to_numpy()
     teks = [[kekuatan(z[i, j]) if i != j else "faktor yang sama" for j in range(len(tampil))] for i in range(len(tampil))]
     fig = go.Figure(go.Heatmap(
-        z=z, x=nama, y=nama, zmin=-1, zmax=1, zmid=0, colorscale="RdBu_r", texttemplate="%{z:.2f}", customdata=teks,
+        z=z, x=nama, y=nama, zmin=-1, zmax=1, zmid=0, colorscale=SKALA_WARNA, texttemplate="%{z:.2f}", customdata=teks,
         colorbar=dict(title="Korelasi"), hovertemplate="<b>%{y}</b> dan <b>%{x}</b><br>Korelasi: %{z:.2f}<br>%{customdata}<extra></extra>",
     ))
     fig.update_yaxes(autorange="reversed")
@@ -309,11 +566,11 @@ elif halaman == "Bandingkan faktor":
     st.subheader("Pengaruh kedua faktor per tanggal")
     status = ["Arah berlawanan" if u * w < 0 else "Arah sama" for u, w in zip(sa, sb)]
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=tanggal, y=sa, mode="lines+markers", name=lb(a), line=dict(color=TURUN, width=1.5), marker=dict(size=5), customdata=status,
+    fig.add_trace(go.Scatter(x=tanggal, y=sa, mode="lines+markers", name=lb(a), line=dict(color=warna(a), width=1.5), marker=dict(size=5), customdata=status,
                              hovertemplate=lb(a) + ": %{y:+.2f} USD<br>%{customdata}<extra></extra>"))
-    fig.add_trace(go.Scatter(x=tanggal, y=sb, mode="lines+markers", name=lb(b), line=dict(color=ORANYE, width=1.5), marker=dict(size=5),
+    fig.add_trace(go.Scatter(x=tanggal, y=sb, mode="lines+markers", name=lb(b), line=dict(color=warna(b), width=1.5), marker=dict(size=5),
                              hovertemplate=lb(b) + ": %{y:+.2f} USD<extra></extra>"))
-    fig.add_hline(y=0, line_color="black", line_width=1)
+    fig.add_hline(y=0, line_color=GARIS, line_width=1)
     fig.update_xaxes(title_text="Tanggal pada data uji", type="date")
     fig.update_yaxes(title_text="Dorongan ke perkiraan harga emas (USD)")
     fig.update_layout(hovermode="x unified")
@@ -330,11 +587,11 @@ elif halaman == "Bandingkan faktor":
                 st.subheader(lb(n))
                 st.write(arah(n))
                 fig = go.Figure(go.Scatter(
-                    x=nilai[n], y=phi[:, fitur.index(n)], mode="markers", marker=dict(size=7, opacity=0.75, color=EMAS if n == "Gold" else TURUN),
+                    x=nilai[n], y=phi[:, fitur.index(n)], mode="markers", marker=dict(size=7, opacity=0.8, color=warna(n)),
                     customdata=[[tanggal[i], y[i], p[i]] for i in range(len(df))],
                     hovertemplate="<b>%{customdata[0]}</b><br>Nilai faktor: %{x:,.4f}<br>Dorongan ke perkiraan harga emas: %{y:+.2f} USD<br>Harga emas sebenarnya: %{customdata[1]:,.2f} USD<br>Perkiraan harga emas: %{customdata[2]:,.2f} USD<extra></extra>",
                 ))
-                fig.add_hline(y=0, line_color="black", line_width=1)
+                fig.add_hline(y=0, line_color=GARIS, line_width=1)
                 fig.update_xaxes(title_text="Nilai faktor")
                 fig.update_yaxes(title_text="Dorongan ke perkiraan harga emas (USD)", range=[lim[0] - pad, lim[1] + pad])
                 tampilkan(fig, f"banding_{n}", 400)
@@ -369,7 +626,7 @@ elif halaman == "Contoh per tanggal":
         hovertemplate="<b>%{y}</b><br>Pengaruh: %{x:+.2f} USD<br>Nilai faktor: %{customdata[0]:,.4f}<br>Perkiraan harga emas bergeser dari %{customdata[1]:,.2f} ke %{customdata[2]:,.2f} USD<extra></extra>",
     ))
     fig.add_vline(x=awal, line_dash="dash", line_color=ABU, annotation_text="Titik awal", annotation_position="top left")
-    fig.add_vline(x=p[i], line_color="black", annotation_text="Perkiraan", annotation_position="top right")
+    fig.add_vline(x=p[i], line_color=GARIS, annotation_text="Perkiraan", annotation_position="top right")
     fig.add_vline(x=y[i], line_color=HIJAU, annotation_text="Sebenarnya", annotation_position="bottom right")
     fig.update_yaxes(autorange="reversed")
     fig.update_xaxes(title_text="Harga emas (USD)")
